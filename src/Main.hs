@@ -83,6 +83,36 @@ splitKeySpace n (startKey, endKey) =
       else
         (initialMinKeys, initialMaxKeys, "")
 
+buildEnv :: Region -> IO Env
+buildEnv r = do
+    lgr <- newLogger Debug stdout
+    newEnv Discover <&> set envLogger lgr . set envRegion r
+
+getPage :: Env -> Text -> (Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))
+getPage env bucketName (start, end) = do
+    let request =
+          listObjectsV (BucketName bucketName)
+          & lStartAfter .~ start
+    response <- runResourceT . runAWST env $ send request
+    let objects = filterEnd end $ view lrsContents response
+    let nextSegment =
+          if view lrsIsTruncated response == Just False then
+            Nothing
+          else
+            let
+              start' = view (oKey . _ObjectKey) $ last objects
+            in
+              Just (start', end)
+    return (objects, nextSegment)
+  where
+    filterEnd :: Maybe Text -> [Object] -> [Object]
+    filterEnd Nothing x = x
+    filterEnd (Just end) x =
+      filter (\o -> view (oKey . _ObjectKey) o <= end) x
+
+
+findAllItems :: (Maybe Text, Maybe Text) -> ((Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))) -> [Object]
+findAllItems = undefined
 
 listAll :: Region -- ^ Region to operate in.
         -> IO ()
