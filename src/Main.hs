@@ -46,18 +46,25 @@ chrText = T.pack . (: []) . chr
 -- >>> splitKeySpace 2 (Just "a", Just "c")
 -- [(Just "a",Just "b"),(Just "b",Just "c")]
 --
+-- >>> splitKeySpace 2 (Just "sa", Just "sc")
+-- [(Just "sa",Just "sb"),(Just "sb",Just "sc")]
+--
 -- >>> splitKeySpace 3 (Nothing, Nothing)
 -- [(Nothing,Just "*"),(Just "*",Just "T"),(Just "T",Nothing)]
 splitKeySpace :: Int -> (Maybe Text, Maybe Text) -> [(Maybe Text, Maybe Text)]
 splitKeySpace 1 s = [s]
-splitKeySpace n (start, end) =
+splitKeySpace n (startKey, endKey) =
   let
+    commonPrefix = join $ T.commonPrefixes <$> startKey <*> endKey
+    end = maybe endKey (\(c,s,e) -> Just e) commonPrefix
+    start = maybe startKey (\(c,s,e) -> Just s) commonPrefix
+    prefix = maybe "" (\(c,_,_) -> c) commonPrefix
     maxKeys = maybe 127 ordText end
     minKeys = maybe 0 ordText start
     stepSize = (maxKeys - minKeys) `div` n
     segments = take (n - 1) $ chrText <$> [minKeys + stepSize,minKeys + stepSize*2..]
-    startItems = start : (Just <$> segments)
-    endItems = (Just <$> segments) ++ [end]
+    startItems = ((prefix <>) <$>) <$> start : (Just <$> segments)
+    endItems = ((prefix <>) <$>) <$> (Just <$> segments) ++ [end]
   in
     zip startItems endItems
 
