@@ -29,3 +29,5 @@ executable s3parallel
                      , lens
                      , bytestring
                      , resourcet
+                     , ekg
+                     , ekg-core

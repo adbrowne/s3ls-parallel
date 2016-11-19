@@ -26,6 +26,10 @@ import qualified Pipes.Prelude as P
 import           Pipes (Producer, Consumer, lift, (>->), runEffect, each, yield, await, for, Pipe)
 import           Pipes.Concurrent (Buffer(..), spawn, unbounded, fromInput, toOutput, forkIO, withSpawn, Input, Output)
 import           System.Mem (performGC)
+import System.Metrics hiding (Value)
+import qualified System.Metrics.Counter as Counter
+import qualified System.Metrics.Distribution as Distribution
+import System.Remote.Monitoring
 
 
 ordText :: Text -> Int
@@ -94,13 +98,35 @@ buildEnv r = do
 
 type PageResult = ([Object], Maybe (Text, Maybe Text))
 
-getPage :: Env -> Text -> (Maybe Text, Maybe Text) -> IO PageResult
-getPage env bucketName (start, end) = do
+getPage :: Env
+  -> Text
+  -> Distribution.Distribution
+  -> Counter.Counter
+  -> Counter.Counter
+  -> Counter.Counter
+  -> (Maybe Text, Maybe Text)
+  -> IO PageResult
+getPage
+  env
+  bucketName
+  items_returned_distribution
+  zero_items_counter
+  non_zero_items_counter
+  requests_counter
+  (start, end) = do
     let request =
           listObjectsV (BucketName bucketName)
           & lStartAfter .~ start
     response <- runResourceT . runAWST env $ send request
     let objects = filterEnd end $ view lrsContents response
+    let objectCount = length objects
+    Distribution.add items_returned_distribution (fromIntegral objectCount)
+    if objectCount == 0 then
+      Counter.inc zero_items_counter
+    else
+      Counter.inc non_zero_items_counter
+
+    Counter.inc requests_counter
     let nextSegment =
           if view lrsIsTruncated response == Just False then
             Nothing
@@ -178,8 +204,20 @@ listAll r = do
 
 main :: IO ()
 main = do
+  metricServer <- forkServer "localhost" 8001
+  let store = serverMetricStore metricServer
+  items_returned_distribution <- createDistribution "items_returned" store
+  zero_items_counter <- createCounter "zero_items_counter" store
+  non_zero_items_counter <- createCounter "non_zero_items_counter" store
+  requests_counter <- createCounter "requests" store
   env <- buildEnv NorthVirginia
-  let nextPage = getPage env "elevation-tiles-prod"
+  let nextPage = getPage
+                    env
+                    "elevation-tiles-prod"
+                    items_returned_distribution
+                    zero_items_counter
+                    non_zero_items_counter
+                    requests_counter
   findAllItems (Nothing, Nothing) nextPage P.drain
 
 say :: MonadIO m => Text -> m ()
