@@ -30,6 +30,9 @@ ordText = ord . T.head
 chrText :: Int -> Text
 chrText = T.pack . (: []) . chr
 
+-- todo add property to check end > start in all cases
+-- todo add test for all common prefix
+
 -- |
 -- >>> :set -XOverloadedStrings
 --
@@ -46,6 +49,9 @@ chrText = T.pack . (: []) . chr
 -- >>> splitKeySpace 2 (Just "a", Just "c")
 -- [(Just "a",Just "b"),(Just "b",Just "c")]
 --
+-- >>> splitKeySpace 2 (Just "s", Just "t")
+-- [(Just "s",Just "s?"),(Just "s?",Just "t")]
+--
 -- >>> splitKeySpace 2 (Just "sa", Just "sc")
 -- [(Just "sa",Just "sb"),(Just "sb",Just "sc")]
 --
@@ -59,14 +65,24 @@ splitKeySpace n (startKey, endKey) =
     end = maybe endKey (\(c,s,e) -> Just e) commonPrefix
     start = maybe startKey (\(c,s,e) -> Just s) commonPrefix
     prefix = maybe "" (\(c,_,_) -> c) commonPrefix
-    maxKeys = maybe 127 ordText end
-    minKeys = maybe 0 ordText start
+    initialMaxKeys = maybe 127 ordText end
+    initialMinKeys = maybe 0 ordText start
+    (minKeys, maxKeys, startPrefix) = getStartPrefix initialMinKeys initialMaxKeys start
     stepSize = (maxKeys - minKeys) `div` n
-    segments = take (n - 1) $ chrText <$> [minKeys + stepSize,minKeys + stepSize*2..]
+    segments = take (n - 1) $ (startPrefix <>) . chrText <$> [minKeys + stepSize,minKeys + stepSize*2..]
     startItems = ((prefix <>) <$>) <$> start : (Just <$> segments)
     endItems = ((prefix <>) <$>) <$> (Just <$> segments) ++ [end]
   in
     zip startItems endItems
+  where
+    getStartPrefix initialMinKeys initialMaxKeys Nothing =
+        (initialMinKeys, initialMaxKeys, "")
+    getStartPrefix initialMinKeys initialMaxKeys (Just start) =
+      if initialMaxKeys - initialMinKeys == 1 then
+        (0, 127, start)
+      else
+        (initialMinKeys, initialMaxKeys, "")
+
 
 listAll :: Region -- ^ Region to operate in.
         -> IO ()
