@@ -1,16 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns      #-}
 
 module Main where
 
 import           Control.Lens
+import           Control.Concurrent (threadDelay)
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.AWS
 import           Control.Monad.Trans.Resource
 import           Data.Char (chr,ord)
 import           Data.ByteString         (ByteString)
-import           Data.Conduit
+--import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
 import qualified Data.Conduit.List       as CL
 import qualified Data.Foldable           as Fold
@@ -22,6 +22,10 @@ import           Network.AWS.Data
 import           Network.AWS.S3
 import           System.IO
 import qualified Data.Text as T
+import qualified Pipes.Prelude as P
+import           Pipes (Producer, Consumer, lift, (>->), runEffect, each, yield, await, for, Pipe)
+import           Pipes.Concurrent (Buffer(..), spawn, unbounded, fromInput, toOutput, forkIO, withSpawn, Input, Output)
+import           System.Mem (performGC)
 
 
 ordText :: Text -> Int
@@ -85,10 +89,12 @@ splitKeySpace n (startKey, endKey) =
 
 buildEnv :: Region -> IO Env
 buildEnv r = do
-    lgr <- newLogger Debug stdout
+    lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r
 
-getPage :: Env -> Text -> (Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))
+type PageResult = ([Object], Maybe (Text, Maybe Text))
+
+getPage :: Env -> Text -> (Maybe Text, Maybe Text) -> IO PageResult
 getPage env bucketName (start, end) = do
     let request =
           listObjectsV (BucketName bucketName)
@@ -98,6 +104,8 @@ getPage env bucketName (start, end) = do
     let nextSegment =
           if view lrsIsTruncated response == Just False then
             Nothing
+          else if null objects then
+            Nothing 
           else
             let
               start' = view (oKey . _ObjectKey) $ last objects
@@ -111,8 +119,33 @@ getPage env bucketName (start, end) = do
       filter (\o -> view (oKey . _ObjectKey) o <= end) x
 
 
-findAllItems :: (Maybe Text, Maybe Text) -> ((Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))) -> [Object]
-findAllItems = undefined
+pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
+pipeBind f = forever $ do
+      a <- Pipes.await
+      forM (f a) yield 
+
+findAllItems :: (Maybe Text, Maybe Text) -> ((Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
+findAllItems startBounds nextPage consumer =
+  withSpawn unbounded go
+  where
+    go :: (Output PageResult, Input PageResult) -> IO ()
+    go (output, input) = do
+      asyncNextPage output startBounds 
+      runEffect $ fromInput input >-> loop 1 output >-> consumer
+    loop :: Int -> Output PageResult -> Pipe PageResult Object IO ()
+    loop 0 _ = return ()
+    loop c output = do
+      lift $ putStrLn ("threads: " ++ show c)
+      (page, next) <- Pipes.await
+      forM_ page yield
+      case next of Nothing -> loop (c - 1) output
+                   (Just (start, end)) -> do
+                     let subSpaces = splitKeySpace 10 (Just start, end)
+                     lift $ forM_ subSpaces (asyncNextPage output)
+                     loop (c - 1 + length subSpaces) output
+    asyncNextPage output bounds = forkIO $ do
+      result <- nextPage bounds
+      runEffect $ Pipes.each [result] >-> toOutput output
 
 listAll :: Region -- ^ Region to operate in.
         -> IO ()
@@ -144,7 +177,10 @@ listAll r = do
           return ()
 
 main :: IO ()
-main = listAll NorthVirginia
+main = do
+  env <- buildEnv NorthVirginia
+  let nextPage = getPage env "elevation-tiles-prod"
+  findAllItems (Nothing, Nothing) nextPage P.drain
 
 say :: MonadIO m => Text -> m ()
 say = liftIO . Text.putStrLn
