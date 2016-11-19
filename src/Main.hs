@@ -167,6 +167,7 @@ findAllItems startBounds nextPage consumer =
       case next of Nothing -> loop (c - 1) output
                    (Just (start, end)) -> do
                      let subSpaces = splitKeySpace 10 (Just start, end)
+                     lift . putStrLn $ show subSpaces
                      lift $ forM_ subSpaces (asyncNextPage output)
                      loop (c - 1 + length subSpaces) output
     asyncNextPage output bounds = forkIO $ do
