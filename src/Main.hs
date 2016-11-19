@@ -2,6 +2,7 @@
 
 module Main where
 
+import           Debug.Trace
 import           Control.Lens
 import           Control.Concurrent (threadDelay)
 import           Control.Monad
@@ -63,6 +64,9 @@ chrText = T.pack . (: []) . chr
 -- >>> splitKeySpace 2 (Just "sa", Just "sc")
 -- [(Just "sa",Just "sb"),(Just "sb",Just "sc")]
 --
+-- >>> splitKeySpace 10 (Just "geotiff/10/1/950.tif",Just "i")
+-- [(Just "geotiff/10/1/950.tif",Just "h"),(Just "h",Just "i")]
+--
 -- >>> splitKeySpace 3 (Nothing, Nothing)
 -- [(Nothing,Just "*"),(Just "*",Just "T"),(Just "T",Nothing)]
 splitKeySpace :: Int -> (Maybe Text, Maybe Text) -> [(Maybe Text, Maybe Text)]
@@ -76,10 +80,13 @@ splitKeySpace n (startKey, endKey) =
     initialMaxKeys = maybe 127 ordText end
     initialMinKeys = maybe 0 ordText start
     (minKeys, maxKeys, startPrefix) = getStartPrefix initialMinKeys initialMaxKeys start
-    stepSize = (maxKeys - minKeys) `div` n
+    stepSize = max 1 $ (maxKeys - minKeys) `div` n
     segments = take (n - 1) $ (startPrefix <>) . chrText <$> [minKeys + stepSize,minKeys + stepSize*2..]
-    startItems = ((prefix <>) <$>) <$> start : (Just <$> segments)
-    endItems = ((prefix <>) <$>) <$> (Just <$> segments) ++ [end]
+    segmentsFilteredByEnd =
+      case end of Nothing -> segments
+                  Just e  -> filter (< e) segments
+    startItems = ((prefix <>) <$>) <$> start : (Just <$> segmentsFilteredByEnd)
+    endItems = ((prefix <>) <$>) <$> (Just <$> segmentsFilteredByEnd) ++ [end]
   in
     zip startItems endItems
   where
@@ -167,6 +174,7 @@ findAllItems startBounds nextPage consumer =
       case next of Nothing -> loop (c - 1) output
                    (Just (start, end)) -> do
                      let subSpaces = splitKeySpace 10 (Just start, end)
+                     lift . putStrLn $ "Splitting: " <>  show (Just start, end)
                      lift . putStrLn $ show subSpaces
                      lift $ forM_ subSpaces (asyncNextPage output)
                      loop (c - 1 + length subSpaces) output
