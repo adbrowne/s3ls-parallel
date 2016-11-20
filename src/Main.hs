@@ -64,6 +64,9 @@ chrText = T.pack . (: []) . chr
 -- >>> splitKeySpace 2 (Just "sa", Just "sc")
 -- [(Just "sa",Just "sb"),(Just "sb",Just "sc")]
 --
+-- >>> splitKeySpace 2 (Just "sab", Just "sb")
+-- [(Just "sab",Just "sap"),(Just "sap",Just "sb")]
+-- 
 -- >>> splitKeySpace 10 (Just "geotiff/10/1/950.tif",Just "i")
 -- [(Just "geotiff/10/1/950.tif",Just "h"),(Just "h",Just "i")]
 --
@@ -90,11 +93,15 @@ splitKeySpace n (startKey, endKey) =
   in
     zip startItems endItems
   where
+    getStartPrefix :: Int -> Int -> Maybe Text -> (Int, Int, Text)
     getStartPrefix initialMinKeys initialMaxKeys Nothing =
         (initialMinKeys, initialMaxKeys, "")
     getStartPrefix initialMinKeys initialMaxKeys (Just start) =
       if initialMaxKeys - initialMinKeys == 1 then
-        (0, 127, start)
+        if T.length start < 2 then
+          (0, 127, start)
+        else
+          (ordText $ T.tail start, 127, T.take 1 start)
       else
         (initialMinKeys, initialMaxKeys, "")
 
