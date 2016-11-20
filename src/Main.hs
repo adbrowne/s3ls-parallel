@@ -164,6 +164,9 @@ pipeBind f = forever $ do
       a <- Pipes.await
       forM (f a) yield 
 
+maxThreads :: Int
+maxThreads = 100
+
 findAllItems :: (Maybe Text, Maybe Text) -> ((Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
 findAllItems startBounds nextPage consumer =
   withSpawn unbounded go
@@ -179,12 +182,17 @@ findAllItems startBounds nextPage consumer =
       (page, next) <- Pipes.await
       forM_ page yield
       case next of Nothing -> loop (c - 1) output
-                   (Just (start, end)) -> do
-                     let subSpaces = splitKeySpace 10 (Just start, end)
-                     lift . putStrLn $ "Splitting: " <>  show (Just start, end)
-                     lift . putStrLn $ show subSpaces
-                     lift $ forM_ subSpaces (asyncNextPage output)
-                     loop (c - 1 + length subSpaces) output
+                   (Just (start, end)) ->
+                     if c < maxThreads then do
+                      let subSpaces = splitKeySpace 10 (Just start, end)
+                      lift . putStrLn $ "Splitting: " <>  show (Just start, end)
+                      lift . putStrLn $ show subSpaces
+                      lift $ forM_ subSpaces (asyncNextPage output)
+                      loop (c - 1 + length subSpaces) output
+                     else do
+                      lift $ asyncNextPage output (Just start, end)
+                      loop c output
+
     asyncNextPage output bounds = forkIO $ do
       result <- nextPage bounds
       runEffect $ Pipes.each [result] >-> toOutput output
@@ -224,6 +232,7 @@ main = do
   let store = serverMetricStore metricServer
   items_returned_distribution <- createDistribution "items_returned" store
   zero_items_counter <- createCounter "zero_items_counter" store
+  items_counter <- createCounter "items_counter" store
   non_zero_items_counter <- createCounter "non_zero_items_counter" store
   requests_counter <- createCounter "requests" store
   env <- buildEnv NorthVirginia
@@ -234,7 +243,10 @@ main = do
                     zero_items_counter
                     non_zero_items_counter
                     requests_counter
-  findAllItems (Nothing, Nothing) nextPage P.drain
+  findAllItems (Nothing, Nothing) nextPage $
+    P.map (view (oKey . _ObjectKey))
+    >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
+    >-> P.print
 
 say :: MonadIO m => Text -> m ()
 say = liftIO . Text.putStrLn
