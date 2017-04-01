@@ -136,13 +136,15 @@ objectToS3Object o = S3Object { s3ObjectKey = view (oKey . _ObjectKey) o }
 getPageTest :: MonadState [S3Object] m => SearchBounds -> m PageResult
 getPageTest (startBound, endBound) = do
   allObjects <- get
-  let relevantObjects = sort $ filter (\x -> afterStartBound x && beforeEndBound x) allObjects 
+  let relevantObjects = sort $ filter withinBounds allObjects 
   let (thisResult, nextResults) = splitAt 1000 relevantObjects
   if null nextResults then
     return (thisResult, Nothing)
   else
-    return (thisResult, Just ((s3ObjectKey . last) thisResult, endBound))
+    let lastResult = (s3ObjectKey . last) thisResult
+    in return (thisResult, Just (lastResult, endBound))
   where
+    withinBounds x = afterStartBound x && beforeEndBound x
     afterStartBound x =
       case startBound of Nothing -> True
                          (Just bound) -> s3ObjectKey x > bound
