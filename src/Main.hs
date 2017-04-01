@@ -111,9 +111,13 @@ buildEnv r = do
     lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r
 
-type PageResult = ([Object], Maybe (Text, Maybe Text))
+data S3Object = S3Object { s3ObjectKey :: Text }
+type PageResult = ([S3Object], Maybe (Text, Maybe Text))
 type SearchBounds = (Maybe Text, Maybe Text)
 type PageRequest m = Monad m => SearchBounds -> m PageResult
+
+objectToS3Object :: Object -> S3Object
+objectToS3Object = undefined 
 
 getPage :: Env
   -> Text
@@ -154,7 +158,7 @@ getPage
               start' = view (oKey . _ObjectKey) $ last objects
             in
               Just (start', end)
-    return (objects, nextSegment)
+    return (fmap objectToS3Object objects, nextSegment)
   where
     filterEnd :: Maybe Text -> [Object] -> [Object]
     filterEnd Nothing x = x
@@ -170,7 +174,7 @@ pipeBind f = forever $ do
 maxThreads :: Int
 maxThreads = 100
 
-actionResult :: PageResult -> Int -> ([Object], [SearchBounds])
+actionResult :: PageResult -> Int -> ([S3Object], [SearchBounds])
 actionResult (page, next) currentThreads =
   case next of Nothing -> (page, [])
                (Just (start, end)) ->
@@ -180,7 +184,7 @@ actionResult (page, next) currentThreads =
                   else do
                     (page, [(Just start, end)])
 
-findAllItems :: SearchBounds -> (SearchBounds -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
+findAllItems :: SearchBounds -> (SearchBounds -> IO ([S3Object], Maybe (Text, Maybe Text))) -> Consumer S3Object IO () -> IO ()
 findAllItems startBounds nextPage consumer =
   withSpawn unbounded go
   where
@@ -188,7 +192,7 @@ findAllItems startBounds nextPage consumer =
     go (output, input) = do
       asyncNextPage output startBounds
       runEffect $ fromInput input >-> loop 1 output >-> consumer
-    loop :: Int -> Output PageResult -> Pipe PageResult Object IO ()
+    loop :: Int -> Output PageResult -> Pipe PageResult S3Object IO ()
     loop 0 _ = return ()
     loop c output = do
       lift $ putStrLn ("threads: " ++ show c)
@@ -219,7 +223,7 @@ main = do
                     non_zero_items_counter
                     requests_counter
   findAllItems (Nothing, Nothing) nextPage $
-    P.map (view (oKey . _ObjectKey))
+    P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.print
 
