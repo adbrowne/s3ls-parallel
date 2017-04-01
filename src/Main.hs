@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Main where
 
@@ -111,6 +112,8 @@ buildEnv r = do
     newEnv Discover <&> set envLogger lgr . set envRegion r
 
 type PageResult = ([Object], Maybe (Text, Maybe Text))
+type SearchBounds = (Maybe Text, Maybe Text)
+type PageRequest m = Monad m => SearchBounds -> m PageResult
 
 getPage :: Env
   -> Text
@@ -167,7 +170,16 @@ pipeBind f = forever $ do
 maxThreads :: Int
 maxThreads = 100
 
-type SearchBounds = (Maybe Text, Maybe Text)
+actionResult :: PageResult -> Int -> ([Object], [SearchBounds])
+actionResult (page, next) currentThreads =
+  case next of Nothing -> (page, [])
+               (Just (start, end)) ->
+                  if currentThreads < maxThreads then do
+                    let subSpaces = splitKeySpace 10 (Just start, end)
+                    (page, subSpaces)
+                  else do
+                    (page, [(Just start, end)])
+
 findAllItems :: SearchBounds -> (SearchBounds -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
 findAllItems startBounds nextPage consumer =
   withSpawn unbounded go
@@ -180,20 +192,11 @@ findAllItems startBounds nextPage consumer =
     loop 0 _ = return ()
     loop c output = do
       lift $ putStrLn ("threads: " ++ show c)
-      (page, next) <- Pipes.await
-      forM_ page yield
-      case next of Nothing -> loop (c - 1) output
-                   (Just (start, end)) ->
-                     if c < maxThreads then do
-                      let subSpaces = splitKeySpace 10 (Just start, end)
-                      lift . putStrLn $ "Splitting: " <>  show (Just start, end)
-                      lift . putStrLn $ show subSpaces
-                      lift $ forM_ subSpaces (asyncNextPage output)
-                      loop (c - 1 + length subSpaces) output
-                     else do
-                      lift $ asyncNextPage output (Just start, end)
-                      loop c output
-
+      result <- Pipes.await
+      let (resultObjects, nextBounds) = actionResult result c
+      forM_ resultObjects yield
+      lift $ forM_ nextBounds (asyncNextPage output)
+      loop (c - 1 + length nextBounds) output
     asyncNextPage output bounds = forkIO $ do
       result <- nextPage bounds
       runEffect $ Pipes.each [result] >-> toOutput output
