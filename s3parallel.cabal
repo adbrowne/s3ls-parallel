@@ -23,6 +23,7 @@ executable s3parallel
                      , amazonka
                      , amazonka-s3
                      , async
+                     , mtl
                      , conduit
                      , conduit-extra
                      , text

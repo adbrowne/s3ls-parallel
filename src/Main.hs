@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Main where
 
@@ -7,10 +8,12 @@ import           Debug.Trace
 import           Control.Lens
 import           Control.Concurrent (threadDelay)
 import           Control.Monad
+import           Control.Monad.State
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.AWS
 import           Control.Monad.Trans.Resource
 import           Data.Char (chr,ord)
+import           Data.List (sort)
 import           Data.ByteString         (ByteString)
 --import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
@@ -111,13 +114,41 @@ buildEnv r = do
     lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r
 
-data S3Object = S3Object { s3ObjectKey :: Text }
+data S3Object = S3Object { s3ObjectKey :: Text } deriving (Show, Eq, Ord)
 type PageResult = ([S3Object], Maybe (Text, Maybe Text))
 type SearchBounds = (Maybe Text, Maybe Text)
 type PageRequest m = Monad m => SearchBounds -> m PageResult
 
 objectToS3Object :: Object -> S3Object
-objectToS3Object = undefined 
+objectToS3Object o = S3Object { s3ObjectKey = view (oKey . _ObjectKey) o }
+
+-- Examples:
+--
+-- |
+-- >>> evalState (getPageTest (Nothing, Nothing)) [S3Object "andrew"]
+-- ([S3Object {s3ObjectKey = "andrew"}],Nothing)
+--
+-- >>> evalState (getPageTest (Nothing, Just "a")) [S3Object "andrew"]
+-- ([],Nothing)
+-- 
+-- >>> evalState (getPageTest (Just "c", Nothing)) [S3Object "andrew"]
+-- ([],Nothing)
+getPageTest :: MonadState [S3Object] m => SearchBounds -> m PageResult
+getPageTest (startBound, endBound) = do
+  allObjects <- get
+  let relevantObjects = sort $ filter (\x -> afterStartBound x && beforeEndBound x) allObjects 
+  let (thisResult, nextResults) = splitAt 1000 relevantObjects
+  if null nextResults then
+    return (thisResult, Nothing)
+  else
+    return (thisResult, Just ((s3ObjectKey . last) thisResult, endBound))
+  where
+    afterStartBound x =
+      case startBound of Nothing -> True
+                         (Just bound) -> s3ObjectKey x > bound
+    beforeEndBound x =
+      case endBound of Nothing -> True
+                       (Just bound) -> s3ObjectKey x < bound
 
 getPage :: Env
   -> Text
@@ -152,7 +183,7 @@ getPage
           if view lrsIsTruncated response == Just False then
             Nothing
           else if null objects then
-            Nothing 
+            Nothing
           else
             let
               start' = view (oKey . _ObjectKey) $ last objects
