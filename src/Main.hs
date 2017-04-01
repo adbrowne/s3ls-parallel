@@ -162,18 +162,19 @@ getPage
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
 pipeBind f = forever $ do
       a <- Pipes.await
-      forM (f a) yield 
+      forM (f a) yield
 
 maxThreads :: Int
 maxThreads = 100
 
-findAllItems :: (Maybe Text, Maybe Text) -> ((Maybe Text, Maybe Text) -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
+type SearchBounds = (Maybe Text, Maybe Text)
+findAllItems :: SearchBounds -> (SearchBounds -> IO ([Object], Maybe (Text, Maybe Text))) -> Consumer Object IO () -> IO ()
 findAllItems startBounds nextPage consumer =
   withSpawn unbounded go
   where
     go :: (Output PageResult, Input PageResult) -> IO ()
     go (output, input) = do
-      asyncNextPage output startBounds 
+      asyncNextPage output startBounds
       runEffect $ fromInput input >-> loop 1 output >-> consumer
     loop :: Int -> Output PageResult -> Pipe PageResult Object IO ()
     loop 0 _ = return ()
@@ -196,35 +197,6 @@ findAllItems startBounds nextPage consumer =
     asyncNextPage output bounds = forkIO $ do
       result <- nextPage bounds
       runEffect $ Pipes.each [result] >-> toOutput output
-
-listAll :: Region -- ^ Region to operate in.
-        -> IO ()
-listAll r = do
-    lgr <- newLogger Debug stdout
-    env <- newEnv Discover <&> set envLogger lgr . set envRegion r
-
-    let val :: ToText a => Maybe a -> Text
-        val   = maybe "Nothing" toText
-
-        lat v = maybe mempty (mappend " - " . toText) (v ^. ovIsLatest)
-        key v = val (v ^. ovKey) <> ": " <> val (v ^. ovVersionId) <> lat v
-
-    runResourceT . runAWST env $ go (Just "h")
-  where
-    go :: Maybe Text -> AWST (ResourceT IO) ()
-    go marker = do
-        say "Listing Items .."
-        let request =
-              listObjectsV (BucketName "elevation-tiles-prod")
-              & lStartAfter .~ marker
-        response <- send request
-        let bs = view lrsContents response
-        say $ "Found " <> toText (length bs) <> " Objects."
-        say $ "Marker:" <> toText (maybe "EMPTY" id marker)
-        if (view lrsIsTruncated response == Just True) then
-          go $ Just (view (oKey . _ObjectKey) $ last bs)
-        else
-          return ()
 
 main :: IO ()
 main = do
