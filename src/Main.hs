@@ -198,7 +198,6 @@ getPage
     filterEnd (Just end) x =
       filter (\o -> view (oKey . _ObjectKey) o <= end) x
 
-
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
 pipeBind f = forever $ do
       a <- Pipes.await
@@ -207,8 +206,8 @@ pipeBind f = forever $ do
 maxThreads :: Int
 maxThreads = 100
 
-actionResult :: PageResult -> Int -> ([S3Object], [SearchBounds])
-actionResult (page, next) currentThreads =
+actionResult :: Int -> PageResult -> ([S3Object], [SearchBounds])
+actionResult currentThreads (page, next) =
   case next of Nothing -> (page, [])
                (Just (start, end)) ->
                   if currentThreads < maxThreads then do
@@ -217,25 +216,23 @@ actionResult (page, next) currentThreads =
                   else do
                     (page, [(Just start, end)])
 
-findAllItems :: SearchBounds -> (SearchBounds -> IO ([S3Object], Maybe (Text, Maybe Text))) -> Consumer S3Object IO () -> IO ()
-findAllItems startBounds nextPage consumer =
+findAllItems :: b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
+findAllItems start next consumer =
   withSpawn unbounded go
   where
-    go :: (Output PageResult, Input PageResult) -> IO ()
     go (output, input) = do
-      asyncNextPage output startBounds
+      asyncNextPage output start
       runEffect $ fromInput input >-> loop 1 output >-> consumer
-    loop :: Int -> Output PageResult -> Pipe PageResult S3Object IO ()
     loop 0 _ = return ()
     loop c output = do
       lift $ putStrLn ("threads: " ++ show c)
       result <- Pipes.await
-      let (resultObjects, nextBounds) = actionResult result c
+      let (resultObjects, nextBounds) = result c
       forM_ resultObjects yield
       lift $ forM_ nextBounds (asyncNextPage output)
       loop (c - 1 + length nextBounds) output
     asyncNextPage output bounds = forkIO $ do
-      result <- nextPage bounds
+      result <- next bounds
       runEffect $ Pipes.each [result] >-> toOutput output
 
 main :: IO ()
@@ -255,7 +252,10 @@ main = do
                     zero_items_counter
                     non_zero_items_counter
                     requests_counter
-  findAllItems (Nothing, Nothing) nextPage $
+  let processResult = \x -> do
+        r <- nextPage x
+        return (\c -> actionResult c r)
+  findAllItems (Nothing, Nothing) processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.print
