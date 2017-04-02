@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -5,6 +6,7 @@
 
 module Main where
 
+import System.Exit (exitFailure)
 import System.Random
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -13,7 +15,8 @@ import           Data.UUID as UUID
 import           Control.DeepSeq
 import           Debug.Trace
 import           Control.Lens
-import           Control.Concurrent (threadDelay, ThreadId)
+import           Control.Concurrent (threadDelay, ThreadId, myThreadId)
+import           Control.Exception (try, SomeException, throwTo)
 import           Control.Monad
 import           Control.Monad.State
 import           Control.Monad.IO.Class
@@ -235,8 +238,8 @@ actionResult currentThreads (page, next) =
                   else do
                     (page, [(Just start, end)])
 
-findAllItems :: b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
-findAllItems start next consumer =
+findAllItems :: ThreadId -> b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
+findAllItems mainThreadId start next consumer =
   withSpawn unbounded go
   where
     go (output, input) = do
@@ -254,9 +257,14 @@ findAllItems start next consumer =
       loop (c - 1 + length nextBounds) output
     asyncNextPage output (requestId, bounds) = forkIO $ do
       putStrLn $ "Starting: " ++ show requestId
-      result <- next bounds
-      runEffect $ Pipes.each [result] >-> toOutput output
-      putStrLn $ "Complete: " ++ show requestId
+      resultEx <- try (next bounds) -- :: IO (Either HttpException (Int -> ([a], [b])))
+      case resultEx of Left (ex :: SomeException) -> do
+                         putStrLn "Exception"
+                         throwTo mainThreadId ex
+                         exitFailure
+                       Right result -> do
+                         runEffect $ Pipes.each [result] >-> toOutput output
+                         putStrLn $ "Complete: " ++ show requestId
 
 runNormally :: IO ()
 runNormally = do
@@ -278,7 +286,8 @@ runNormally = do
   let processResult = \x -> do
         r <- timeItem "nextPage" (nextPage) x
         return (\c -> actionResult c r)
-  findAllItems (Just "logs/2016-01-01", Just "m") processResult $
+  mainThreadId <- myThreadId
+  findAllItems mainThreadId (Just "logs/2016-01-01", Just "m") processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.print
