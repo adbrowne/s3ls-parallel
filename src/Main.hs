@@ -5,18 +5,22 @@
 
 module Main where
 
+import System.Random
+import Data.Set (Set)
+import qualified Data.Set as Set
 import GHC.Generics (Generic)
+import           Data.UUID as UUID
 import           Control.DeepSeq
 import           Debug.Trace
 import           Control.Lens
-import           Control.Concurrent (threadDelay)
+import           Control.Concurrent (threadDelay, ThreadId)
 import           Control.Monad
 import           Control.Monad.State
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.AWS
 import           Control.Monad.Trans.Resource
 import           Data.Char (chr,ord)
-import           Data.List (sort)
+import           Data.List (sort, foldl')
 import           Data.ByteString         (ByteString)
 --import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
@@ -142,7 +146,7 @@ getPageTest (startBound, endBound) = do
   allObjects <- get
   let relevantObjects = sort $ filter withinBounds allObjects 
   let (thisResult, nextResults) = splitAt 1000 relevantObjects
-  if null nextResults then
+  if Fold.null nextResults then
     return (thisResult, Nothing)
   else
     let lastResult = (s3ObjectKey . last) thisResult
@@ -188,7 +192,7 @@ getPage
     let nextSegment =
           if view lrsIsTruncated response == Just False then
             Nothing
-          else if null objects then
+          else if Fold.null objects then
             Nothing
           else
             let
@@ -236,7 +240,8 @@ findAllItems start next consumer =
   withSpawn unbounded go
   where
     go (output, input) = do
-      asyncNextPage output start
+      requestId <- randomIO :: IO UUID.UUID
+      asyncNextPage output (requestId, start)
       runEffect $ fromInput input >-> loop 1 output >-> consumer
     loop 0 _ = return ()
     loop c output = do
@@ -244,11 +249,14 @@ findAllItems start next consumer =
       result <- Pipes.await
       let (resultObjects, nextBounds) = result c
       forM_ resultObjects yield
-      lift $ forM_ nextBounds (asyncNextPage output)
+      nextBounds' <- lift $ traverse (\x -> (randomIO :: IO UUID) >>= \y -> return (y,x)) nextBounds
+      lift $ forM_ nextBounds' (asyncNextPage output)
       loop (c - 1 + length nextBounds) output
-    asyncNextPage output bounds = forkIO $ do
+    asyncNextPage output (requestId, bounds) = forkIO $ do
+      putStrLn $ "Starting: " ++ show requestId
       result <- next bounds
       runEffect $ Pipes.each [result] >-> toOutput output
+      putStrLn $ "Complete: " ++ show requestId
 
 runNormally :: IO ()
 runNormally = do

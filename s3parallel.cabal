@@ -25,6 +25,9 @@ executable s3parallel
                      , async
                      , mtl
                      , deepseq
+                     , containers
+                     , uuid
+                     , random
                      , conduit
                      , conduit-extra
                      , text
