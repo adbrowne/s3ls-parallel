@@ -115,7 +115,7 @@ splitKeySpace n (startKey, endKey) =
 buildEnv :: Region -> IO Env
 buildEnv r = do
     lgr <- newLogger Error stdout
-    newEnv Discover <&> set envLogger lgr . set envRegion r
+    newEnv Discover <&> set envLogger lgr . set envRegion r <&> set envRetryCheck (\_ _ -> True)
 
 data S3Object = S3Object { s3ObjectKey :: Text } deriving (Show, Eq, Ord, Generic)
 instance NFData S3Object
@@ -195,10 +195,7 @@ getPage
               start' = view (oKey . _ObjectKey) $ last objects
             in
               Just (start', end)
-    let result = (fmap objectToS3Object objects, nextSegment)
-    _ <- (deepseq result (return ())) -- Ensure we include deserialization
-    endTime <- getCurrentTime
-    return result
+    return $ (fmap objectToS3Object objects, nextSegment)
   where
     filterEnd :: Maybe Text -> [Object] -> [Object]
     filterEnd Nothing x = x
@@ -209,10 +206,10 @@ timeItem :: NFData b => String -> (a -> IO b) -> a -> IO b
 timeItem name f a = do
     startTime <- getCurrentTime
     result <- f a
-    _ <- deepseq result (return ())
+    _ <- deepseq result (return ()) -- Ensure we include deserialization
     endTime <- getCurrentTime
     let diff = diffUTCTime endTime startTime
-    putStr $ "Timing: " ++ name
+    putStr $ "Timing: " ++ name ++ " "
     print diff
     return result
 
@@ -273,7 +270,7 @@ runNormally = do
   let processResult = \x -> do
         r <- timeItem "nextPage" (nextPage) x
         return (\c -> actionResult c r)
-  findAllItems (Just "logs/2017-01-02", Just "logs/2017-01-10") processResult $
+  findAllItems (Just "logs/2016-01-01", Just "m") processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.print
