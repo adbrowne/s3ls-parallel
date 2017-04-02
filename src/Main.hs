@@ -1,9 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Main where
 
+import GHC.Generics (Generic)
+import           Control.DeepSeq
 import           Debug.Trace
 import           Control.Lens
 import           Control.Concurrent (threadDelay)
@@ -114,7 +117,8 @@ buildEnv r = do
     lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r
 
-data S3Object = S3Object { s3ObjectKey :: Text } deriving (Show, Eq, Ord)
+data S3Object = S3Object { s3ObjectKey :: Text } deriving (Show, Eq, Ord, Generic)
+instance NFData S3Object
 type PageResult = ([S3Object], Maybe (Text, Maybe Text))
 type SearchBounds = (Maybe Text, Maybe Text)
 type PageRequest m = Monad m => SearchBounds -> m PageResult
@@ -171,7 +175,7 @@ getPage
     let request =
           listObjectsV (BucketName bucketName)
           & lStartAfter .~ start
-    response <- runResourceT . runAWST env $ send request
+    response <- runResourceT . runAWST env $ timeout 10 $ send request
     let objects = filterEnd end $ view lrsContents response
     let objectCount = length objects
     Distribution.add items_returned_distribution (fromIntegral objectCount)
@@ -191,12 +195,26 @@ getPage
               start' = view (oKey . _ObjectKey) $ last objects
             in
               Just (start', end)
-    return (fmap objectToS3Object objects, nextSegment)
+    let result = (fmap objectToS3Object objects, nextSegment)
+    _ <- (deepseq result (return ())) -- Ensure we include deserialization
+    endTime <- getCurrentTime
+    return result
   where
     filterEnd :: Maybe Text -> [Object] -> [Object]
     filterEnd Nothing x = x
     filterEnd (Just end) x =
       filter (\o -> view (oKey . _ObjectKey) o <= end) x
+
+timeItem :: NFData b => String -> (a -> IO b) -> a -> IO b
+timeItem name f a = do
+    startTime <- getCurrentTime
+    result <- f a
+    _ <- deepseq result (return ())
+    endTime <- getCurrentTime
+    let diff = diffUTCTime endTime startTime
+    putStr $ "Timing: " ++ name
+    print diff
+    return result
 
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
 pipeBind f = forever $ do
@@ -235,8 +253,8 @@ findAllItems start next consumer =
       result <- next bounds
       runEffect $ Pipes.each [result] >-> toOutput output
 
-main :: IO ()
-main = do
+runNormally :: IO ()
+runNormally = do
   metricServer <- forkServer "localhost" 8001
   let store = serverMetricStore metricServer
   items_returned_distribution <- createDistribution "items_returned" store
@@ -244,7 +262,7 @@ main = do
   items_counter <- createCounter "items_counter" store
   non_zero_items_counter <- createCounter "non_zero_items_counter" store
   requests_counter <- createCounter "requests" store
-  env <- buildEnv NorthVirginia
+  env <- buildEnv NorthVirginia 
   let nextPage = getPage
                     env
                     "elevation-tiles-prod"
@@ -253,12 +271,22 @@ main = do
                     non_zero_items_counter
                     requests_counter
   let processResult = \x -> do
-        r <- nextPage x
+        r <- timeItem "nextPage" (nextPage) x
         return (\c -> actionResult c r)
-  findAllItems (Nothing, Nothing) processResult $
+  findAllItems (Just "logs/2017-01-02", Just "logs/2017-01-10") processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.print
+
+failOn10 :: Int -> IO (Int -> ([Int],[Int]))
+failOn10 b = do
+  let result _ = if b > 10 then error "Bad"
+                 else ([b],[b+1])
+  return result
+
+main :: IO ()
+main = runNormally
+  --findAllItems 0 failOn10 $ P.print
 
 say :: MonadIO m => Text -> m ()
 say = liftIO . Text.putStrLn
