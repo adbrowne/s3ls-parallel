@@ -290,7 +290,8 @@ runNormally = do
   findAllItems mainThreadId (Just "logs/2016-01-01", Just "m") processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
-    >-> P.print
+    >-> P.map (\t -> "File: " ++ T.unpack t)
+    >-> P.stdoutLn
 
 failOn10 :: Int -> IO (Int -> ([Int],[Int]))
 failOn10 b = do
