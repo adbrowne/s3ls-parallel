@@ -219,7 +219,7 @@ timeItem log name f a = do
     _ <- deepseq result (return ()) -- Ensure we include deserialization
     endTime <- getCurrentTime
     let diff = diffUTCTime endTime startTime
-    log $ "Timing: " ++ name ++ show diff
+    log $ "Timing: " ++ name ++ " " ++ show diff
     return result
 
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
