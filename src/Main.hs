@@ -15,7 +15,7 @@ import           Data.UUID as UUID
 import           Control.DeepSeq
 import           Debug.Trace
 import           Control.Lens
-import           Control.Concurrent (threadDelay, ThreadId, myThreadId)
+import           Control.Concurrent (threadDelay, ThreadId, myThreadId, withMVar, newMVar, MVar)
 import           Control.Exception (try, SomeException, throwTo)
 import           Control.Monad
 import           Control.Monad.State
@@ -209,15 +209,17 @@ getPage
     filterEnd (Just end) x =
       filter (\o -> view (oKey . _ObjectKey) o <= end) x
 
-timeItem :: NFData b => String -> (a -> IO b) -> a -> IO b
-timeItem name f a = do
+log :: MVar () -> String -> IO ()
+log lock text = withMVar lock $ \_ -> putStrLn text
+
+timeItem :: NFData b => (String -> IO ()) -> String -> (a -> IO b) -> a -> IO b
+timeItem log name f a = do
     startTime <- getCurrentTime
     result <- f a
     _ <- deepseq result (return ()) -- Ensure we include deserialization
     endTime <- getCurrentTime
     let diff = diffUTCTime endTime startTime
-    putStr $ "Timing: " ++ name ++ " "
-    print diff
+    log $ "Timing: " ++ name ++ show diff
     return result
 
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
@@ -238,8 +240,8 @@ actionResult currentThreads (page, next) =
                   else do
                     (page, [(Just start, end)])
 
-findAllItems :: ThreadId -> b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
-findAllItems mainThreadId start next consumer =
+findAllItems :: ThreadId -> (String -> IO ()) -> b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
+findAllItems mainThreadId log start next consumer =
   withSpawn unbounded go
   where
     go (output, input) = do
@@ -248,7 +250,7 @@ findAllItems mainThreadId start next consumer =
       runEffect $ fromInput input >-> loop 1 output >-> consumer
     loop 0 _ = return ()
     loop c output = do
-      lift $ putStrLn ("threads: " ++ show c)
+      lift $ log ("threads: " ++ show c)
       result <- Pipes.await
       let (resultObjects, nextBounds) = result c
       forM_ resultObjects yield
@@ -256,19 +258,21 @@ findAllItems mainThreadId start next consumer =
       lift $ forM_ nextBounds' (asyncNextPage output)
       loop (c - 1 + length nextBounds) output
     asyncNextPage output (requestId, bounds) = forkIO $ do
-      putStrLn $ "Starting: " ++ show requestId
+      log $ "Starting: " ++ show requestId
       resultEx <- try (next bounds) -- :: IO (Either HttpException (Int -> ([a], [b])))
       case resultEx of Left (ex :: SomeException) -> do
-                         putStrLn "Exception"
+                         log "Exception"
                          throwTo mainThreadId ex
                          exitFailure
                        Right result -> do
                          runEffect $ Pipes.each [result] >-> toOutput output
-                         putStrLn $ "Complete: " ++ show requestId
+                         log $ "Complete: " ++ show requestId
 
 runNormally :: IO ()
 runNormally = do
   metricServer <- forkServer "localhost" 8001
+  logLock <- newMVar ()
+  let log' = Main.log logLock
   let store = serverMetricStore metricServer
   items_returned_distribution <- createDistribution "items_returned" store
   zero_items_counter <- createCounter "zero_items_counter" store
@@ -284,10 +288,10 @@ runNormally = do
                     non_zero_items_counter
                     requests_counter
   let processResult = \x -> do
-        r <- timeItem "nextPage" (nextPage) x
+        r <- timeItem log' "nextPage" (nextPage) x
         return (\c -> actionResult c r)
   mainThreadId <- myThreadId
-  findAllItems mainThreadId (Just "logs/2016-01-01", Just "m") processResult $
+  findAllItems mainThreadId log' (Just "logs/2016-01-01", Just "m") processResult $
     P.map s3ObjectKey
     >-> P.tee (P.mapM_ $ \_ -> Counter.inc items_counter)
     >-> P.map (\t -> "File: " ++ T.unpack t)
