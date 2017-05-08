@@ -8,6 +8,7 @@ module Main where
 
 import System.Exit (exitFailure)
 import System.Random
+import System.IO
 import Data.Set (Set)
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
@@ -15,7 +16,7 @@ import           Data.UUID as UUID
 import           Control.DeepSeq
 import           Debug.Trace
 import           Control.Lens
-import           Control.Concurrent (threadDelay, ThreadId, myThreadId, withMVar, newMVar, MVar)
+import           Control.Concurrent (threadDelay, ThreadId, myThreadId, withMVar, newMVar, MVar, forkFinally, newEmptyMVar, putMVar, takeMVar)
 import           Control.Exception (try, SomeException, throwTo)
 import           Control.Monad
 import           Control.Monad.State
@@ -80,7 +81,7 @@ chrText = T.pack . (: []) . chr
 --
 -- >>> splitKeySpace 2 (Just "sab", Just "sb")
 -- [(Just "sab",Just "sap"),(Just "sap",Just "sb")]
--- 
+--
 -- >>> splitKeySpace 10 (Just "geotiff/10/1/950.tif",Just "i")
 -- [(Just "geotiff/10/1/950.tif",Just "h"),(Just "h",Just "i")]
 --
@@ -141,13 +142,13 @@ objectToS3Object o = S3Object { s3ObjectKey = view (oKey . _ObjectKey) o }
 --
 -- >>> evalState (getPageTest (Nothing, Just "a")) [S3Object "andrew"]
 -- ([],Nothing)
--- 
+--
 -- >>> evalState (getPageTest (Just "c", Nothing)) [S3Object "andrew"]
 -- ([],Nothing)
 getPageTest :: MonadState [S3Object] m => SearchBounds -> m PageResult
 getPageTest (startBound, endBound) = do
   allObjects <- get
-  let relevantObjects = sort $ filter withinBounds allObjects 
+  let relevantObjects = sort $ filter withinBounds allObjects
   let (thisResult, nextResults) = splitAt 1000 relevantObjects
   if Fold.null nextResults then
     return (thisResult, Nothing)
@@ -259,7 +260,7 @@ findAllItems mainThreadId log start next consumer =
       loop (c - 1 + length nextBounds) output
     asyncNextPage output (requestId, bounds) = forkIO $ do
       log $ "Starting: " ++ show requestId
-      resultEx <- try (next bounds) -- :: IO (Either HttpException (Int -> ([a], [b])))
+      resultEx <- try (next bounds)
       case resultEx of Left (ex :: SomeException) -> do
                          log "Exception"
                          throwTo mainThreadId ex
@@ -268,25 +269,31 @@ findAllItems mainThreadId log start next consumer =
                          runEffect $ Pipes.each [result] >-> toOutput output
                          log $ "Complete: " ++ show requestId
 
-runNormally :: IO ()
-runNormally = do
+buildNextPage :: IO(Store, (Maybe Text, Maybe Text) -> IO PageResult)
+buildNextPage = do
   metricServer <- forkServer "localhost" 8001
-  logLock <- newMVar ()
-  let log' = Main.log logLock
   let store = serverMetricStore metricServer
   items_returned_distribution <- createDistribution "items_returned" store
   zero_items_counter <- createCounter "zero_items_counter" store
-  items_counter <- createCounter "items_counter" store
   non_zero_items_counter <- createCounter "non_zero_items_counter" store
   requests_counter <- createCounter "requests" store
-  env <- buildEnv NorthVirginia 
-  let nextPage = getPage
-                    env
-                    "elevation-tiles-prod"
-                    items_returned_distribution
-                    zero_items_counter
-                    non_zero_items_counter
-                    requests_counter
+  env <- buildEnv NorthVirginia
+  return (store, \x ->
+    getPage
+      env
+      "elevation-tiles-prod"
+      items_returned_distribution
+      zero_items_counter
+      non_zero_items_counter
+      requests_counter
+      x)
+
+runNormally :: IO ()
+runNormally = do
+  logLock <- newMVar ()
+  let log' = Main.log logLock
+  (store, nextPage) <- buildNextPage
+  items_counter <- createCounter "items_counter" store
   let processResult = \x -> do
         r <- timeItem log' "nextPage" (nextPage) x
         return (\c -> actionResult c r)
@@ -303,8 +310,51 @@ failOn10 b = do
                  else ([b],[b+1])
   return result
 
+takeEveryNth :: Int -> String -> StateT Int IO Bool
+takeEveryNth n =
+  go
+  where go text = do
+          v <- get
+          if(v == 0) then
+            put n >> return True
+          else
+            put (v - 1) >> return False
+
+downloadSegment :: Counter.Counter -> ((Maybe Text, Maybe Text) -> IO PageResult) -> (Maybe Text, Maybe Text) -> IO ()
+downloadSegment itemsCounter nextPage init = do
+  (items, next) <- nextPage init
+  forM_ items (\t -> (putStrLn $ "File: " ++ T.unpack (s3ObjectKey t)) >> Counter.inc itemsCounter)
+  case next of Nothing -> return ()
+               (Just (start, end)) -> downloadSegment itemsCounter nextPage (Just start, end)
+
+forkThread :: IO () -> IO (MVar ())
+forkThread proc = do
+    handle <- newEmptyMVar
+    _ <- forkFinally proc (\_ -> putMVar handle ())
+    return handle
+
+runStartingFromList filePath = do
+  handle <- openFile filePath ReadMode
+  handle2 <- openFile filePath ReadMode
+  (store, nextPage) <- buildNextPage
+  items_counter <- createCounter "items_counter" store
+  r <- runEffect $ P.length (P.fromHandle handle)
+  let itemsPerSegment = r `div` maxThreads
+  print itemsPerSegment
+  dividers <- evalStateT (P.toListM $ (P.fromHandle handle2) >-> P.filterM (takeEveryNth itemsPerSegment)) itemsPerSegment
+  let dividers' = fmap (T.pack) dividers
+  let startSegments = (Just "logs/2016-01-01") : (fmap Just dividers')
+  let endSegments = fmap Just dividers' ++ [Just "m"]
+  let segments = zip startSegments endSegments
+  print segments
+  print $ length segments
+  threads <- forM segments (\s -> forkThread (downloadSegment items_counter nextPage s))
+  mapM_ takeMVar threads
+
 main :: IO ()
-main = runNormally
+main =
+  --runStartingFromList "./tiles2.files"
+  runNormally
   --findAllItems 0 failOn10 $ P.print
 
 say :: MonadIO m => Text -> m ()
