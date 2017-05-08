@@ -15,6 +15,7 @@ cabal-version:       >=1.10
 
 library
   default-language:    Haskell2010
+  ghc-options:         -Wall
   hs-source-dirs:      src
   exposed-modules:     S3Parallel
   build-depends:       base >= 4.7 && < 5
@@ -24,7 +25,7 @@ library
                      , deepseq
 
 executable s3parallel-exe
-  ghc-options:         -threaded -rtsopts -eventlog -with-rtsopts=-T 
+  ghc-options:         -threaded -rtsopts -eventlog -with-rtsopts=-T -Wall
   main-is:             Main.hs
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
@@ -49,8 +50,9 @@ executable s3parallel-exe
                      , ekg
                      , ekg-core
 
-Test-Suite test-foo
+Test-Suite s3parallel-test
   type:                exitcode-stdio-1.0
+  ghc-options:         -Wall
   hs-source-dirs:      tests
   main-is:             TestMain.hs
   default-language:    Haskell2010
