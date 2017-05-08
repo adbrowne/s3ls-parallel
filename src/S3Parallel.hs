@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 
-module S3Parallel (PageResult(..), PageResultNew(..), S3Object(..), objectToS3Object) where
+module S3Parallel (PageResult, PageResultNew, S3Object(..), objectToS3Object) where
 
 import           GHC.Generics (Generic)
 import           Control.DeepSeq

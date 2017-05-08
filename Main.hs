@@ -8,41 +8,28 @@ module Main where
 
 import S3Parallel
 import System.Exit (exitFailure)
-import System.Random
+import System.Random (randomIO)
 import System.IO
-import Data.Set (Set)
-import qualified Data.Set as Set
-import GHC.Generics (Generic)
 import           Data.UUID as UUID
 import           Control.DeepSeq
-import           Debug.Trace
 import           Control.Lens
-import           Control.Concurrent (threadDelay, ThreadId, myThreadId, withMVar, newMVar, MVar, forkFinally, newEmptyMVar, putMVar, takeMVar)
+import           Control.Concurrent (ThreadId, myThreadId, withMVar, newMVar, MVar, forkFinally, newEmptyMVar, putMVar, takeMVar)
 import           Control.Exception (try, SomeException, throwTo)
 import           Control.Monad
 import           Control.Monad.State
-import           Control.Monad.IO.Class
-import           Control.Monad.Trans.AWS
-import           Control.Monad.Trans.Resource
+import           Control.Monad.Trans.AWS (Env, runResourceT, runAWST, send, envRetryCheck, timeout, envLogger, envRegion, Credentials(..), newLogger, LogLevel(..), newEnv)
 import           Data.Char (chr,ord)
-import           Data.List (sort, foldl')
-import           Data.ByteString         (ByteString)
---import           Data.Conduit
-import qualified Data.Conduit.Binary     as CB
-import qualified Data.Conduit.List       as CL
+import           Data.List (sort)
 import qualified Data.Foldable           as Fold
 import           Data.Monoid
 import           Data.Text               (Text)
 import qualified Data.Text.IO            as Text
 import           Data.Time
-import           Network.AWS.Data
 import           Network.AWS.S3
-import           System.IO
 import qualified Data.Text as T
 import qualified Pipes.Prelude as P
-import           Pipes (Producer, Consumer, lift, (>->), runEffect, each, yield, await, for, Pipe)
-import           Pipes.Concurrent (Buffer(..), spawn, unbounded, fromInput, toOutput, forkIO, withSpawn, Input, Output)
-import           System.Mem (performGC)
+import           Pipes (Consumer, lift, (>->), runEffect, each, yield, await, Pipe)
+import           Pipes.Concurrent (unbounded, fromInput, toOutput, forkIO, withSpawn)
 import System.Metrics hiding (Value)
 import qualified System.Metrics.Counter as Counter
 import qualified System.Metrics.Distribution as Distribution
@@ -92,10 +79,10 @@ splitKeySpace :: Int -> (Maybe Text, Maybe Text) -> [(Maybe Text, Maybe Text)]
 splitKeySpace 1 s = [s]
 splitKeySpace n (startKey, endKey) =
   let
-    commonPrefix = join $ T.commonPrefixes <$> startKey <*> endKey
-    end = maybe endKey (\(c,s,e) -> Just e) commonPrefix
-    start = maybe startKey (\(c,s,e) -> Just s) commonPrefix
-    prefix = maybe "" (\(c,_,_) -> c) commonPrefix
+    sharedPrefix = join $ T.commonPrefixes <$> startKey <*> endKey
+    end = maybe endKey (\(_,_,e) -> Just e) sharedPrefix
+    start = maybe startKey (\(_,s,_) -> Just s) sharedPrefix
+    prefix = maybe "" (\(c,_,_) -> c) sharedPrefix
     initialMaxKeys = maybe 127 ordText end
     initialMinKeys = maybe 0 ordText start
     (minKeys, maxKeys, startPrefix) = getStartPrefix initialMinKeys initialMaxKeys start
@@ -202,20 +189,20 @@ getPage
   where
     filterEnd :: Maybe Text -> [Object] -> [Object]
     filterEnd Nothing x = x
-    filterEnd (Just end) x =
-      filter (\o -> view (oKey . _ObjectKey) o <= end) x
+    filterEnd (Just endKey) x =
+      filter (\o -> view (oKey . _ObjectKey) o <= endKey) x
 
 log :: MVar () -> String -> IO ()
 log lock text = withMVar lock $ \_ -> putStrLn text
 
 timeItem :: NFData b => (String -> IO ()) -> String -> (a -> IO b) -> a -> IO b
-timeItem log name f a = do
+timeItem logger name f a = do
     startTime <- getCurrentTime
     result <- f a
     _ <- deepseq result (return ()) -- Ensure we include deserialization
     endTime <- getCurrentTime
     let diff = diffUTCTime endTime startTime
-    log $ "Timing: " ++ name ++ " " ++ show diff
+    logger $ "Timing: " ++ name ++ " " ++ show diff
     return result
 
 pipeBind :: Monad m => (a -> [b]) -> Pipe a b m r
@@ -237,16 +224,16 @@ actionResult currentThreads (page, next) =
                     (page, [(Just start, end)])
 
 findAllItems :: ThreadId -> (String -> IO ()) -> b -> (b -> IO (Int -> ([a], [b]))) -> Consumer a IO () -> IO ()
-findAllItems mainThreadId log start next consumer =
+findAllItems mainThreadId logger start next consumer =
   withSpawn unbounded go
   where
     go (output, input) = do
       requestId <- randomIO :: IO UUID.UUID
-      asyncNextPage output (requestId, start)
+      _ <- asyncNextPage output (requestId, start)
       runEffect $ fromInput input >-> loop 1 output >-> consumer
     loop 0 _ = return ()
     loop c output = do
-      lift $ log ("threads: " ++ show c)
+      lift $ logger ("threads: " ++ show c)
       result <- Pipes.await
       let (resultObjects, nextBounds) = result c
       forM_ resultObjects yield
@@ -254,15 +241,15 @@ findAllItems mainThreadId log start next consumer =
       lift $ forM_ nextBounds' (asyncNextPage output)
       loop (c - 1 + length nextBounds) output
     asyncNextPage output (requestId, bounds) = forkIO $ do
-      log $ "Starting: " ++ show requestId
+      logger $ "Starting: " ++ show requestId
       resultEx <- try (next bounds)
       case resultEx of Left (ex :: SomeException) -> do
-                         log "Exception"
+                         logger "Exception"
                          throwTo mainThreadId ex
                          exitFailure
                        Right result -> do
                          runEffect $ Pipes.each [result] >-> toOutput output
-                         log $ "Complete: " ++ show requestId
+                         logger $ "Complete: " ++ show requestId
 
 buildNextPage :: IO(Store, (Maybe Text, Maybe Text) -> IO PageResult)
 buildNextPage = do
@@ -308,7 +295,7 @@ failOn10 b = do
 takeEveryNth :: Int -> String -> StateT Int IO Bool
 takeEveryNth n =
   go
-  where go text = do
+  where go _ = do
           v <- get
           if(v == 0) then
             put n >> return True
@@ -316,8 +303,8 @@ takeEveryNth n =
             put (v - 1) >> return False
 
 downloadSegment :: Counter.Counter -> ((Maybe Text, Maybe Text) -> IO PageResult) -> (Maybe Text, Maybe Text) -> IO ()
-downloadSegment itemsCounter nextPage init = do
-  (items, next) <- nextPage init
+downloadSegment itemsCounter nextPage initial = do
+  (items, next) <- nextPage initial
   forM_ items (\t -> (putStrLn $ "File: " ++ T.unpack (s3ObjectKey t)) >> Counter.inc itemsCounter)
   case next of Nothing -> return ()
                (Just (start, end)) -> downloadSegment itemsCounter nextPage (Just start, end)
@@ -328,6 +315,7 @@ forkThread proc = do
     _ <- forkFinally proc (\_ -> putMVar handle ())
     return handle
 
+runStartingFromList :: FilePath -> IO ()
 runStartingFromList filePath = do
   handle <- openFile filePath ReadMode
   handle2 <- openFile filePath ReadMode
