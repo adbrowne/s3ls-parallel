@@ -12,12 +12,23 @@ category:            Web
 build-type:          Simple
 cabal-version:       >=1.10
 
-executable s3parallel
-  ghc-options:         -threaded -rtsopts -eventlog -with-rtsopts=-T 
+
+library
+  default-language:    Haskell2010
   hs-source-dirs:      src
+  exposed-modules:     S3Parallel
+  build-depends:       base >= 4.7 && < 5
+                     , amazonka-s3
+                     , lens
+                     , text
+                     , deepseq
+
+executable s3parallel-exe
+  ghc-options:         -threaded -rtsopts -eventlog -with-rtsopts=-T 
   main-is:             Main.hs
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
+                     , s3parallel
                      , pipes
                      , pipes-concurrency
                      , amazonka
@@ -37,3 +48,15 @@ executable s3parallel
                      , resourcet
                      , ekg
                      , ekg-core
+
+Test-Suite test-foo
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      tests
+  main-is:             TestMain.hs
+  default-language:    Haskell2010
+  build-depends:       base
+                     , s3parallel
+                     , text
+                     , tasty
+                     , tasty-hunit
+                     , tasty-quickcheck 

@@ -6,6 +6,7 @@
 
 module Main where
 
+import S3Parallel
 import System.Exit (exitFailure)
 import System.Random
 import System.IO
@@ -125,14 +126,8 @@ buildEnv r = do
     lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r <&> set envRetryCheck (\_ _ -> True)
 
-data S3Object = S3Object { s3ObjectKey :: Text } deriving (Show, Eq, Ord, Generic)
-instance NFData S3Object
-type PageResult = ([S3Object], Maybe (Text, Maybe Text))
 type SearchBounds = (Maybe Text, Maybe Text)
 type PageRequest m = Monad m => SearchBounds -> m PageResult
-
-objectToS3Object :: Object -> S3Object
-objectToS3Object o = S3Object { s3ObjectKey = view (oKey . _ObjectKey) o }
 
 -- Examples:
 --
