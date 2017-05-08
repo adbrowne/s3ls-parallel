@@ -3,15 +3,14 @@
 module Main where
 
 import Test.Tasty
-import Test.Tasty.QuickCheck as QC
 import Test.Tasty.HUnit
 import S3Parallel (PageResultNew,S3Object(..))
 
 import Data.List
-import Data.Ord
 import Data.Text (Text)
 import qualified Data.Text as T
 
+main :: IO ()
 main = defaultMain tests
 
 data PageRequest = PageRequest { startAfter :: Maybe Text }
@@ -43,7 +42,7 @@ simulate requestTime items initialRequests initialState onResult =
     loop state ((_,nextReq):requests) time =
       let
         nextResult = getResults items nextReq
-        (results, state', newRequests) = onResult nextResult state
+        (_results, state', newRequests) = onResult nextResult state
         newRequestsWithTime = appendRequestTime time <$> newRequests
         requests' = requests ++ newRequestsWithTime
         time' = time + requestTime
@@ -52,10 +51,11 @@ simulate requestTime items initialRequests initialState onResult =
 tests :: TestTree
 tests = testGroup "Tests" [unitTests]
 
+unitTests :: TestTree
 unitTests = testGroup "Unit tests"
   [ testCase "Serial requests takes pages * time to complete" $
       let
-        items = S3Object . T.pack . show <$> [1..1800]
+        items = S3Object . T.pack . show <$> [(1::Integer)..1999]
         onResult (x, Nothing)    () = (x, (), [])
         onResult (x, startAfter) () = (x, (), [PageRequest startAfter])
       in simulate 123 items [PageRequest Nothing] () onResult @?= ((), 246)
