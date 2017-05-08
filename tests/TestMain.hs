@@ -22,7 +22,7 @@ getResults :: [S3Object] -> PageRequest -> PageResultNew
 getResults items PageRequest{..} =
   let
     maxPageSize = 1000
-    results = S3Object <$> (take maxPageSize $ dropBeforeStart $ sort $ s3ObjectKey <$> items)
+    results = take maxPageSize . dropBeforeStart . sort $ items
     next = if length results < maxPageSize then
              Nothing
            else
@@ -30,8 +30,10 @@ getResults items PageRequest{..} =
   in (results, next)
   where
     dropBeforeStart =
-      case startAfter of Nothing      -> id
-                         (Just start) -> dropWhile (\x -> x <= start)
+      case startAfter of Nothing      ->
+                           id
+                         (Just start) ->
+                           dropWhile (\S3Object{..} -> s3ObjectKey <= start)
 
 simulate :: Int -> [S3Object] -> [PageRequest] -> s -> ProcessResult s -> (s, Int)
 simulate requestTime items initialRequests initialState onResult =
