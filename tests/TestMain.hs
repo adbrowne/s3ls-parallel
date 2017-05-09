@@ -17,7 +17,7 @@ getResults :: [S3Object] -> PageRequest rs -> PageResultNew rs
 getResults items PageRequest{..} =
   let
     maxPageSize = 1000
-    results = take maxPageSize . dropBeforeStart . sort $ items
+    results = take maxPageSize . dropBeforeStart . sortOn s3ObjectKey $ items
     next = if length results < maxPageSize then
              Nothing
            else
@@ -30,7 +30,7 @@ getResults items PageRequest{..} =
                          (Just start) ->
                            dropWhile (\S3Object{..} -> s3ObjectKey <= start)
 
-simulate :: Int -> [S3Object] -> [PageRequest rs] -> s -> ProcessResult s rs -> (s, Int)
+simulate :: Show rs => Int -> [S3Object] -> [PageRequest rs] -> s -> ProcessResult s rs -> (s, Int)
 simulate requestTime items initialRequests initialState processResult =
   loop initialState (appendRequestTime requestTime <$> initialRequests) 0
   where
@@ -69,4 +69,9 @@ unitTests = testGroup "Unit tests"
         items = S3Object . T.pack . show <$> [(1::Integer)..1999]
         requests = [PageRequest Nothing (Nothing, Nothing)]
       in simulate 123 items requests 1 onResult @?= (0, 246)
+  , testCase "Real algorithm with 200000 integer keys" $
+      let
+        items = S3Object . T.pack . show <$> [(1::Integer)..50000]
+        requests = [PageRequest Nothing (Nothing, Nothing)]
+      in simulate 123 items requests 1 onResult @?= (0, 738)
   ]

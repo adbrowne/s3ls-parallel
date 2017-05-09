@@ -101,7 +101,10 @@ splitKeySpace n (startKey, endKey) =
     startItems = ((prefix <>) <$>) <$> start : (Just <$> segmentsFilteredByEnd)
     endItems = ((prefix <>) <$>) <$> (Just <$> segmentsFilteredByEnd) ++ [end]
   in
-    zip startItems endItems
+    if (startKey < endKey || endKey == Nothing) then
+      zip startItems endItems
+    else
+      []
   where
     getStartPrefix :: Int -> Int -> Maybe Text -> (Int, Int, Text)
     getStartPrefix initialMinKeys initialMaxKeys Nothing =
