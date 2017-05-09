@@ -5,7 +5,7 @@ module Main where
 
 import Test.Tasty
 import Test.Tasty.HUnit
-import S3Parallel (PageResultNew,S3Object(..),PageRequest(..), ProcessResult)
+import S3Parallel (PageResultNew,S3Object(..),PageRequest(..), ProcessResult, onResult)
 
 import Data.List
 import qualified Data.Text as T
@@ -31,7 +31,7 @@ getResults items PageRequest{..} =
                            dropWhile (\S3Object{..} -> s3ObjectKey <= start)
 
 simulate :: Int -> [S3Object] -> [PageRequest rs] -> s -> ProcessResult s rs -> (s, Int)
-simulate requestTime items initialRequests initialState onResult =
+simulate requestTime items initialRequests initialState processResult =
   loop initialState (appendRequestTime requestTime <$> initialRequests) 0
   where
     appendRequestTime t x = (t,x)
@@ -42,7 +42,7 @@ simulate requestTime items initialRequests initialState onResult =
         (time, nextReq) = head sortedRequests
         remainingRequests = tail sortedRequests
         nextResult = getResults items nextReq
-        (_results, state', newRequests) = onResult nextResult state
+        (_results, state', newRequests) = processResult nextResult state
         newRequestsWithTime = appendRequestTime (time + requestTime) <$> newRequests
         requests' = remainingRequests ++ newRequestsWithTime
       in loop state' requests' time
@@ -55,13 +55,18 @@ unitTests = testGroup "Unit tests"
   [ testCase "Serial requests takes pages * time to complete" $
       let
         items = S3Object . T.pack . show <$> [(1::Integer)..1999]
-        onResult (x, Nothing, ())    () = (x, (), [])
-        onResult (x, startAfter, ()) () = (x, (), [PageRequest startAfter ()])
-      in simulate 123 items [PageRequest Nothing ()] () onResult @?= ((), 246)
+        myOnResult (x, Nothing, ())    () = (x, (), [])
+        myOnResult (x, startAfter, ()) () = (x, (), [PageRequest startAfter ()])
+      in simulate 123 items [PageRequest Nothing ()] () myOnResult @?= ((), 246)
   , testCase "Initial requests are done in parallel" $
       let
         items = S3Object . T.pack . show <$> [(1::Integer)..1999]
-        onResult (x, _, _)    () = (x, (), [])
+        myOnResult (x, _, _)    () = (x, (), [])
         requests = [PageRequest Nothing (), PageRequest (Just "1000") ()]
-      in simulate 123 items requests () onResult @?= ((), 123)
+      in simulate 123 items requests () myOnResult @?= ((), 123)
+  , testCase "Real algorithm runs" $
+      let
+        items = S3Object . T.pack . show <$> [(1::Integer)..1999]
+        requests = [PageRequest Nothing (Nothing, Nothing)]
+      in simulate 123 items requests 1 onResult @?= (0, 246)
   ]

@@ -10,6 +10,7 @@ module S3Parallel
   ,objectToS3Object
   ,splitKeySpace
   ,SearchBounds
+  ,onResult
   ,ProcessResult)
   where
 
@@ -123,7 +124,7 @@ onResult :: ProcessResult Int SearchBounds
 onResult (results, Nothing, searchBounds) currentThreads =
   let
     filteredResults = filterEndBounds searchBounds results
-  in (filteredResults, currentThreads, [])
+  in (filteredResults, currentThreads - 1, [])
 onResult (results, Just startAfterNext, searchBounds) currentThreads =
   let
     maxThreads = 100
