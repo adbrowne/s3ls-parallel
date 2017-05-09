@@ -18,10 +18,8 @@ import           Control.Exception (try, SomeException, throwTo)
 import           Control.Monad
 import           Control.Monad.State
 import           Control.Monad.Trans.AWS (Env, runResourceT, runAWST, send, envRetryCheck, timeout, envLogger, envRegion, Credentials(..), newLogger, LogLevel(..), newEnv)
-import           Data.Char (chr,ord)
 import           Data.List (sort)
 import qualified Data.Foldable           as Fold
-import           Data.Monoid
 import           Data.Text               (Text)
 import qualified Data.Text.IO            as Text
 import           Data.Time
@@ -36,84 +34,11 @@ import qualified System.Metrics.Distribution as Distribution
 import System.Remote.Monitoring
 
 
-ordText :: Text -> Int
-ordText = ord . T.head
-
-chrText :: Int -> Text
-chrText = T.pack . (: []) . chr
-
--- todo add property to check end > start in all cases
--- todo add test for all common prefix
-
--- |
--- >>> :set -XOverloadedStrings
---
--- | Split a keyspace into smaller segments
---
--- Examples:
---
--- >>> splitKeySpace 1 (Nothing, Nothing)
--- [(Nothing,Nothing)]
---
--- >>> splitKeySpace 2 (Nothing, Nothing)
--- [(Nothing,Just "?"),(Just "?",Nothing)]
---
--- >>> splitKeySpace 2 (Just "a", Just "c")
--- [(Just "a",Just "b"),(Just "b",Just "c")]
---
--- >>> splitKeySpace 2 (Just "s", Just "t")
--- [(Just "s",Just "s?"),(Just "s?",Just "t")]
---
--- >>> splitKeySpace 2 (Just "sa", Just "sc")
--- [(Just "sa",Just "sb"),(Just "sb",Just "sc")]
---
--- >>> splitKeySpace 2 (Just "sab", Just "sb")
--- [(Just "sab",Just "sap"),(Just "sap",Just "sb")]
---
--- >>> splitKeySpace 10 (Just "geotiff/10/1/950.tif",Just "i")
--- [(Just "geotiff/10/1/950.tif",Just "h"),(Just "h",Just "i")]
---
--- >>> splitKeySpace 3 (Nothing, Nothing)
--- [(Nothing,Just "*"),(Just "*",Just "T"),(Just "T",Nothing)]
-splitKeySpace :: Int -> (Maybe Text, Maybe Text) -> [(Maybe Text, Maybe Text)]
-splitKeySpace 1 s = [s]
-splitKeySpace n (startKey, endKey) =
-  let
-    sharedPrefix = join $ T.commonPrefixes <$> startKey <*> endKey
-    end = maybe endKey (\(_,_,e) -> Just e) sharedPrefix
-    start = maybe startKey (\(_,s,_) -> Just s) sharedPrefix
-    prefix = maybe "" (\(c,_,_) -> c) sharedPrefix
-    initialMaxKeys = maybe 127 ordText end
-    initialMinKeys = maybe 0 ordText start
-    (minKeys, maxKeys, startPrefix) = getStartPrefix initialMinKeys initialMaxKeys start
-    stepSize = max 1 $ (maxKeys - minKeys) `div` n
-    segments = take (n - 1) $ (startPrefix <>) . chrText <$> [minKeys + stepSize,minKeys + stepSize*2..]
-    segmentsFilteredByEnd =
-      case end of Nothing -> segments
-                  Just e  -> filter (< e) segments
-    startItems = ((prefix <>) <$>) <$> start : (Just <$> segmentsFilteredByEnd)
-    endItems = ((prefix <>) <$>) <$> (Just <$> segmentsFilteredByEnd) ++ [end]
-  in
-    zip startItems endItems
-  where
-    getStartPrefix :: Int -> Int -> Maybe Text -> (Int, Int, Text)
-    getStartPrefix initialMinKeys initialMaxKeys Nothing =
-        (initialMinKeys, initialMaxKeys, "")
-    getStartPrefix initialMinKeys initialMaxKeys (Just start) =
-      if initialMaxKeys - initialMinKeys == 1 then
-        if T.length start < 2 then
-          (0, 127, start)
-        else
-          (ordText $ T.tail start, 127, T.take 1 start)
-      else
-        (initialMinKeys, initialMaxKeys, "")
-
 buildEnv :: Region -> IO Env
 buildEnv r = do
     lgr <- newLogger Error stdout
     newEnv Discover <&> set envLogger lgr . set envRegion r <&> set envRetryCheck (\_ _ -> True)
 
-type SearchBounds = (Maybe Text, Maybe Text)
 type PageRequest m = Monad m => SearchBounds -> m PageResult
 
 -- Examples:
