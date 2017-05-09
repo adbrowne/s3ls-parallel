@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
@@ -37,18 +38,20 @@ getResults items PageRequest{..} =
 
 simulate :: Int -> [S3Object] -> [PageRequest] -> s -> ProcessResult s -> (s, Int)
 simulate requestTime items initialRequests initialState onResult =
-  loop initialState (appendRequestTime 0 <$> initialRequests) 0
+  loop initialState (appendRequestTime requestTime <$> initialRequests) 0
   where
     appendRequestTime t x = (t,x)
     loop state [] time = (state, time)
-    loop state ((_,nextReq):requests) time =
+    loop state requests _ =
       let
+        sortedRequests = sortOn fst requests
+        (time, nextReq) = head sortedRequests
+        remainingRequests = tail sortedRequests
         nextResult = getResults items nextReq
         (_results, state', newRequests) = onResult nextResult state
-        newRequestsWithTime = appendRequestTime time <$> newRequests
-        requests' = requests ++ newRequestsWithTime
-        time' = time + requestTime
-      in loop state' requests' time'
+        newRequestsWithTime = appendRequestTime (time + requestTime) <$> newRequests
+        requests' = remainingRequests ++ newRequestsWithTime
+      in loop state' requests' time
 
 tests :: TestTree
 tests = testGroup "Tests" [unitTests]
@@ -61,4 +64,10 @@ unitTests = testGroup "Unit tests"
         onResult (x, Nothing)    () = (x, (), [])
         onResult (x, startAfter) () = (x, (), [PageRequest startAfter])
       in simulate 123 items [PageRequest Nothing] () onResult @?= ((), 246)
+  , testCase "Initial requests are done in parallel" $
+      let
+        items = S3Object . T.pack . show <$> [(1::Integer)..1999]
+        onResult (x, _)    () = (x, (), [])
+        requests = [PageRequest Nothing, PageRequest (Just "1000")]
+      in simulate 123 items requests () onResult @?= ((), 123)
   ]
